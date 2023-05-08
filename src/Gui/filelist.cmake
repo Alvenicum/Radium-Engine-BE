@@ -28,6 +28,7 @@ set(gui_sources
     Utils/PickingManager.cpp
     Viewer/CameraManipulator.cpp
     Viewer/FlightCameraManipulator.cpp
+    Viewer/CameraRecorder.cpp
     Viewer/Gizmo/Gizmo.cpp
     Viewer/Gizmo/GizmoManager.cpp
     Viewer/Gizmo/RotateGizmo.cpp
@@ -69,6 +70,7 @@ set(gui_headers
     Utils/PickingManager.hpp
     Utils/qt_utils.hpp
     Viewer/CameraManipulator.hpp
+    Viewer/CameraRecorder.hpp
     Viewer/FlightCameraManipulator.hpp
     Viewer/Gizmo/Gizmo.hpp
     Viewer/Gizmo/GizmoManager.hpp

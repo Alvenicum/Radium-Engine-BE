@@ -1,106 +1,315 @@
 // Include Radium base application and its simple Gui
+#include "Core/Animation/KeyFramedValue.hpp"
+#include "Core/Animation/KeyFramedValueInterpolators.hpp"
+#include "Core/Asset/Camera.hpp"
+#include "Core/Types.hpp"
+#include "Engine/Scene/CameraComponent.hpp"
+#include "Engine/Scene/Entity.hpp"
+#include "Gui/Utils/KeyMappingManager.hpp"
+#include "Gui/Viewer/FlightCameraManipulator.hpp"
+#include "Gui/Viewer/RotateAroundCameraManipulator.hpp"
+#include "IO/AssimpLoader/AssimpCameraDataLoader.hpp"
 #include <Gui/BaseApplication.hpp>
 #include <Gui/RadiumWindow/SimpleWindowFactory.hpp>
-#include <Gui/Viewer/Viewer.hpp>
 
-// include the Engine/entity/component interface
+// include the core geometry/appearance interface
 #include <Core/Geometry/MeshPrimitives.hpp>
-#include <Engine/Scene/CameraManager.hpp>
+
+// include the Engine/entity/component/system/animation interface
+#include <Engine/FrameInfo.hpp>
 #include <Engine/Scene/EntityManager.hpp>
 #include <Engine/Scene/GeometryComponent.hpp>
+#include <Engine/Scene/System.hpp>
 
-// include the Environment texture management
-#include <Core/Resources/Resources.hpp>
-#include <Engine/Data/EnvironmentTexture.hpp>
-// include the ForwardRenderer to add background rendering
-#include <Engine/Rendering/ForwardRenderer.hpp>
+// include the task animation interface
+#include <Core/Tasks/Task.hpp>
 
-// include Qt elements
+// include the camera manager interface
+#include <Engine/Scene/CameraManager.hpp>
+
+// include the viewer to add key event
+#include <Gui/Viewer/Viewer.hpp>
+
+#include <Gui/Viewer/CameraRecorder.hpp>
+
+// To terminate the demo after a given time
 #include <QTimer>
+#include <cstddef>
+#include <iostream>
+#include <ostream>
+#include <qcoreevent.h>
+#include <qevent.h>
+#include <vector>
 
+using namespace Ra;
 using namespace Ra::Core;
 using namespace Ra::Engine;
 
-//! [Implementing a simple custom renderer]
-class SkyBoxRenderer : public Rendering::ForwardRenderer
+class KeyFramedCameraComponent : public Ra::Engine::Scene::CameraComponent
 {
   public:
-    using ForwardRenderer::ForwardRenderer;
-    std::string getRendererName() const override { return "Skybox Renderer"; }
+    inline KeyFramedCameraComponent( Ra::Engine::Scene::Entity* entity, const std::string& name ) :
+        Ra::Engine::Scene::CameraComponent( entity, name ),
+        m_animatedEntity( entity ),
+        m_transform( 0_ra, Ra::Core::Transform::Identity() ) {}
 
-    void setEnvMap( const std::string& filename ) {
-        m_envMap.reset( new Data::EnvironmentTexture( filename, true ) );
+    void updateKeyFrames( const std::vector<Vector3>* positions ) {
+
+        for ( size_t i = 0; i < m_transform.size(); ++i ) {
+            m_transform.removeKeyFrame( i );
+        }
+
+        //! [Creating the transform KeyFrames]
+        Ra::Core::Transform T = Ra::Core::Transform::Identity();
+        for ( int i = 0; i < positions->size() - 1; ++i ) {
+            const auto pt  = ( *positions )[i];
+            const auto pt1 = ( *positions )[i + 1];
+            T.translate( Vector3 { pt1.x() - pt.x(), pt1.y() - pt.y(), pt1.z() - pt.z() } );
+            m_transform.insertKeyFrame( i, T );
+        }
+        //! [Creating the transform KeyFrames]
     }
 
-  protected:
-    void renderBackground( const Data::ViewingParameters& viewData ) override {
-        m_envMap->render( viewData );
+    /// This function uses the keyframes to update the camera to time \p t.
+    void update( Scalar t ) {
+        //! [Fetch transform from KeyFramedValue]
+        auto T = m_transform.at( t, Ra::Core::Animation::linearInterpolate<Ra::Core::Transform> );
+        m_animatedEntity->setTransform( T );
     }
 
-  private:
-    std::unique_ptr<Data::EnvironmentTexture> m_envMap { nullptr };
+    /// The Keyframes for the render object's tranform.
+    Ra::Core::Animation::KeyFramedValue<Ra::Core::Transform> m_transform;
+    Scene::Entity* m_animatedEntity;
 };
-//! [Implementing a simple custom renderer]
 
-//! [Configuring a simple window with the custom renderer]
-class DemoWindowFactory : public Ra::Gui::BaseApplication::WindowFactory
+//! [Define a simple animation system]
+/// This system will be added to the engine. Every frame it will
+/// add a task to be executed, calling the update function of the component.
+/// \note This system makes time loop around.
+class SimpleAnimationSystem : public Ra::Engine::Scene::System
 {
   public:
-    ~DemoWindowFactory() = default;
-    inline Ra::Gui::MainWindowInterface* createMainWindow() const override {
-        auto window = new Ra::Gui::SimpleWindow();
-        //! [Setting the custom Renderer]
-        auto renderer = std::make_shared<SkyBoxRenderer>();
-        window->addRenderer( renderer->getRendererName(), renderer );
-        //! [Setting the custom Renderer]
-        return window;
+    virtual void generateTasks( Ra::Core::TaskQueue* q,
+                                const Ra::Engine::FrameInfo& info ) override {
+        KeyFramedCameraComponent* c =
+            static_cast<KeyFramedCameraComponent*>( m_components[0].second );
+
+        // Create a new task which wil call c->spin() when executed.
+        q->registerTask( std::make_unique<Ra::Core::FunctionTask>(
+            std::bind( &KeyFramedCameraComponent::update, c, info.m_animationTime ), "replay" ) );
     }
 };
-//! [Configuring a simple window with the custom renderer]
 
+/* ---------------------------------------------------------------------------------------------- */
+/*                             main function that build the demo scene                            */
+/* ---------------------------------------------------------------------------------------------- */
 int main( int argc, char* argv[] ) {
     //! [Creating the application]
-    Ra::Gui::BaseApplication app( argc, argv );
-    app.initialize( DemoWindowFactory {} );
+    Gui::BaseApplication app( argc, argv );
+    app.initialize( Ra::Gui::SimpleWindowFactory {} );
     //! [Creating the application]
 
-    //! [Setting the envmap on the renderer]
-    auto rp            = Resources::getResourcesPath();
-    std::string envmap = *rp + "/Examples/EnvMap/Assets/studio_garden_2k.exr";
-    auto r = static_cast<SkyBoxRenderer*>( app.m_mainWindow->getViewer()->getRenderer() );
+    //! [Create the demo animation system]
+    SimpleAnimationSystem* sys = new SimpleAnimationSystem;
 
-    r->setEnvMap( envmap );
-    //! [Setting the envmap on the renderer]
+    //![Parameterize the Engine  time loop]
+    app.m_engine->setRealTime( true );
+    //![Parameterize the Engine  time loop]
 
-    //! [Creating the cube]
-    auto cube = Ra::Core::Geometry::makeSharpBox( { 0.1f, 0.1f, 0.1f } );
-    //! [Creating the cube]
-
-    //! [Colorize the Cube]
-    cube.addAttrib(
-        "in_color",
-        Ra::Core::Vector4Array { cube.vertices().size(), Ra::Core::Utils::Color::Green() } );
-    //! [Colorize the Cube]
-
-    //! [Create the engine entity for the cube]
-    auto e = app.m_engine->getEntityManager()->createEntity( "Green cube" );
-    //! [Create the engine entity for the cube]
-
-    //! [Create a geometry component with the cube]
-    new Ra::Engine::Scene::TriangleMeshComponent( "Cube Mesh", e, std::move( cube ), nullptr );
-    //! [Create a geometry component with the cube]
-
-    //! [Place the camera away from the cube]
+    //! [Cache the camera manager]
     auto cameraManager =
         static_cast<Scene::CameraManager*>( app.m_engine->getSystem( "DefaultCameraManager" ) );
-    auto c      = app.m_engine->getEntityManager()->createEntity( "Fixed Camera" );
-    auto camera = new Scene::CameraComponent( c, "Camera" );
-    camera->initialize();
-    camera->getCamera()->setPosition( Vector3 { -2_ra, 1_ra, 5_ra } );
-    camera->getCamera()->setDirection( Vector3 { 0.4_ra, -0.1_ra, -1_ra } );
-    cameraManager->addCamera( camera );
-    cameraManager->activate( cameraManager->getCameraIndex( camera ) );
-    //! [Place the camera away from the cube]
+    //! [Cache the camera manager]
+
+    //! [Add usefull custom key events]
+    auto callback0 = [cameraManager]( QEvent* event ) {
+        if ( event->type() == QEvent::KeyPress ) {
+            auto keyEvent = static_cast<QKeyEvent*>( event );
+            // Convert ascii code to camera index
+            cameraManager->activate( 0 );
+        }
+    };
+
+    auto callback1 = [cameraManager]( QEvent* event ) {
+        if ( event->type() == QEvent::KeyPress ) {
+            auto keyEvent = static_cast<QKeyEvent*>( event );
+            // Convert ascii code to camera index
+            cameraManager->activate( 1 );
+        }
+    };
+
+    app.m_mainWindow->getViewer()->addCustomAction(
+        "switchCam0",
+        Gui::KeyMappingManager::createEventBindingFromStrings( "", "ControlModifier", "Key_K" ),
+        callback0 );
+    app.m_mainWindow->getViewer()->addCustomAction(
+        "switchCam1",
+        Gui::KeyMappingManager::createEventBindingFromStrings( "", "ControlModifier", "Key_L" ),
+        callback1 );
+    //! [Add usefull custom key events]
+
+    //! [Create the camera animation system demonstrator]
+    // auto playbackSystem = new CameraPlaybackSystem;
+    // app.m_engine->registerSystem( "Camera playback system", playbackSystem );
+    //! [Create the camera animation system demonstrator]
+
+    //! [Create the demo fixed entity/component]
+    {
+        //! [Create the engine entity for the fixed component]
+        auto e = app.m_engine->getEntityManager()->createEntity( "Fixed cube" );
+        //! [Create the engine entity for the fixed component]
+
+        //! [Creating the cube]
+        auto cube = Geometry::makeSharpBox( { 0.5f, 0.5f, 0.5f }, Utils::Color::Green() );
+        //! [Creating the Cube]
+
+        //! [Create a geometry component with the cube]
+        // component ownership is transfered to entity in component ctor
+        new Scene::TriangleMeshComponent( "Fixed cube geometry", e, std::move( cube ), nullptr );
+        //! [Create a geometry component with the cube]
+    }
+    //! [Create the demo fixed entity/component]
+
+    //! [Create the reference camera]
+    Asset::Camera* referenceCamera = nullptr;
+    {
+        auto e      = app.m_engine->getEntityManager()->createEntity( "Reference Camera" );
+        auto camera = new Scene::CameraComponent( e, "Camera" );
+        camera->initialize();
+        camera->getCamera()->setPosition( Vector3 { 0, 0, 5 } );
+        camera->getCamera()->setDirection( Vector3 { 0, 0, -1 } );
+
+        auto viewer = app.m_mainWindow->getViewer();
+        viewer->setCameraManipulator(
+            new Gui::FlightCameraManipulator( *( viewer->getCameraManipulator() ) ) );
+
+        cameraManager->addCamera( camera );
+        cameraManager->activate( cameraManager->getCameraIndex( camera ) );
+
+        auto window = app.m_mainWindow.get();
+        viewer->addCustomAction(
+            "DEMO_CAMERAFORWARD",
+            Ra::Gui::KeyMappingManager::createEventBindingFromStrings( "", "", "Key_Up" ),
+            [camera, cameraManager]( QEvent* event ) {
+                auto pos = camera->getCamera()->getPosition();
+                Transform transform( Translation { 0, 0, -.1 } );
+                camera->getCamera()->applyTransform( transform );
+                cameraManager->activate( 0 );
+            } );
+
+        viewer->addCustomAction(
+            "DEMO_CAMERABACKWARD",
+            Ra::Gui::KeyMappingManager::createEventBindingFromStrings( "", "", "Key_Down" ),
+            [camera, cameraManager]( QEvent* event ) {
+                auto pos = camera->getCamera()->getPosition();
+                Transform transform( Translation { 0, 0, .1 } );
+                camera->getCamera()->applyTransform( transform );
+                cameraManager->activate( 0 );
+            } );
+
+        viewer->addCustomAction( "DEMO_CAMERAUP",
+                                 Ra::Gui::KeyMappingManager::createEventBindingFromStrings(
+                                     "", "ShiftModifier", "Key_Up" ),
+                                 [camera, cameraManager]( QEvent* event ) {
+                                     auto pos = camera->getCamera()->getPosition();
+                                     Transform transform( Translation { 0, .1, 0 } );
+                                     camera->getCamera()->applyTransform( transform );
+                                     cameraManager->activate( 0 );
+                                 } );
+
+        viewer->addCustomAction( "DEMO_CAMERADOWN",
+                                 Ra::Gui::KeyMappingManager::createEventBindingFromStrings(
+                                     "", "ShiftModifier", "Key_Down" ),
+                                 [camera, cameraManager]( QEvent* event ) {
+                                     Transform transform( Translation { 0, -.1, 0 } );
+                                     camera->getCamera()->applyTransform( transform );
+                                     cameraManager->activate( 0 );
+                                 } );
+
+        viewer->addCustomAction(
+            "DEMO_CAMERALEFT",
+            Ra::Gui::KeyMappingManager::createEventBindingFromStrings( "", "", "Key_Left" ),
+            [camera, cameraManager]( QEvent* event ) {
+                auto pos = camera->getCamera()->getPosition();
+                Transform transform( Translation { -.1, 0, 0 } );
+                camera->getCamera()->applyTransform( transform );
+                cameraManager->activate( 0 );
+            } );
+
+        viewer->addCustomAction(
+            "DEMO_CAMERARIGHT",
+            Ra::Gui::KeyMappingManager::createEventBindingFromStrings( "", "", "Key_Right" ),
+            [cameraManager, camera]( QEvent* event ) {
+                auto pos = camera->getCamera()->getPosition();
+                Transform transform( Translation { .1, 0, 0 } );
+                camera->getCamera()->applyTransform( transform );
+                cameraManager->activate( 0 );
+            } );
+
+        referenceCamera = camera->getCamera();
+    }
+    //! [Create the reference camera]
+
+    //! [Create the demo animated entity/components]
+    KeyFramedCameraComponent* playbackCamera = nullptr;
+    {
+        //! [Create the animated entity ]
+        auto e              = app.m_engine->getEntityManager()->createEntity( "Animated entity" );
+        Transform transform = Ra::Core::Transform::Identity();
+        e->setTransform( transform );
+        e->swapTransformBuffers();
+        //! [Create the animated entity ]
+
+        // playbackSystem->addEntity( e );
+
+        playbackCamera = new KeyFramedCameraComponent( e, "Playback Camera" );
+        playbackCamera->initialize();
+        playbackCamera->getCamera()->setPosition( Vector3 { 0, 0, 5 } );
+        playbackCamera->getCamera()->setDirection( Vector3 { 0, 0, -1 } );
+        playbackCamera->show( true );
+        cameraManager->addCamera( playbackCamera );
+
+
+        //! [add the component to the animation system]
+        sys->addComponent( e, playbackCamera );
+        //! [add the component to the animation system]
+    }
+    app.m_engine->registerSystem( "Playback system", sys );
+
+    //! [Create the demo animated entity/components]
+
+    auto cameraRecorder = Gui::CameraRecorder( referenceCamera );
+    app.m_mainWindow->getViewer()->addCustomAction(
+        "TOGGLE_RECORDING",
+        Ra::Gui::KeyMappingManager::createEventBindingFromStrings( "", "", "Key_I" ),
+        [&cameraRecorder]( QEvent* event ) {
+            if ( event->type() == QEvent::KeyPress ) {
+                cameraRecorder.toggleRecord(true);
+                std::cout<<"Toggle recording \n";
+            };
+        } );
+
+    bool playback = false;
+    app.m_mainWindow->getViewer()->addCustomAction(
+        "TOGGLE_REPLAYING",
+        Ra::Gui::KeyMappingManager::createEventBindingFromStrings( "", "", "Key_P" ),
+        [&app, &cameraRecorder, playbackCamera, &playback]( QEvent* event ) {
+            size_t frameNb = cameraRecorder.getPositions()->size();
+            if ( event->type() == QEvent::KeyPress ) {
+                if ( !playback && frameNb > 1 ) {
+                    std::cout << "start replaying\n";
+                    playbackCamera->updateKeyFrames( cameraRecorder.getPositions() );
+                    app.m_engine->setEndTime( frameNb );
+                    app.m_engine->setRealTime( true );
+                    app.m_engine->play( true );
+                    playback = true;
+                } else if (playback) {
+                    std::cout << "stop replaying\n";
+                    app.m_engine->play( false );
+                    playback = false;
+                }
+            }
+        } );
 
     //! [Tell the window that something is to be displayed]
     // Do not call app.m_mainWindow->prepareDisplay(); as it replace the active camera by the
